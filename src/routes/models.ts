@@ -4,6 +4,7 @@
 
 import { Hono } from "hono";
 import { getModelData } from "../model-registry.js";
+import { modelNotFoundError, sendError } from "../errors.js";
 import type { Env, OpenAIModel, OneMinModelEntry } from "../types.js";
 
 const app = new Hono<Env>();
@@ -96,16 +97,7 @@ app.get("/v1/models/:modelId", async (c) => {
   const entry = data.entries.find((e) => e.modelId === modelId);
 
   if (!entry) {
-    return c.json(
-      {
-        error: {
-          message: "Model '" + modelId + "' not found",
-          type: "invalid_request_error",
-          code: "model_not_found",
-        },
-      },
-      404,
-    );
+    return sendError(c, modelNotFoundError(modelId));
   }
 
   return c.json(enrichModel(entry, data.fetchedAt));

@@ -149,23 +149,12 @@ app.route("/", metricsRoutes);
 // Protected routes (auth + rate limit)
 // ---------------------------------------------------------------------------
 
-const protectedPaths = ["/v1/chat", "/v1/images", "/v1/audio", "/v1/engines"];
-app.use("*", async (c, next) => {
-  const path = c.req.path;
-  if (protectedPaths.some((p) => path.startsWith(p))) {
-    return await authMiddleware(c, next);
-  } else {
-    await next();
-  }
-});
-app.use("*", async (c, next) => {
-  const path = c.req.path;
-  if (protectedPaths.some((p) => path.startsWith(p))) {
-    return rateLimitMiddleware({ maxRequests: 60, windowMs: 60_000 })(c, next);
-  } else {
-    await next();
-  }
-});
+const rateLimit = rateLimitMiddleware({ maxRequests: 60, windowMs: 60_000 });
+
+app.use("/v1/chat/*", authMiddleware, rateLimit);
+app.use("/v1/images/*", authMiddleware, rateLimit);
+app.use("/v1/audio/*", authMiddleware, rateLimit);
+app.use("/v1/engines/*", authMiddleware, rateLimit);
 
 app.route("/", chatRoutes);
 app.route("/", imageRoutes);
@@ -238,3 +227,6 @@ function shutdown(signal: string): void {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+export { app, server };
+export default app;

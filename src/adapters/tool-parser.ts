@@ -124,16 +124,65 @@ export function parseToolCalls(text: string): ToolCall[] | null {
 }
 
 export function stripToolCalls(text: string): string {
-  return text
-    .replace(/TOOL_CALL:\s*\{[^}]*\}/g, "")
-    .replace(/\[TOOL_CALLS\]\s*\[.*?\]/gs, "")
-    .replace(/✿FUNCTION✿:[\s\S]*?✿ARGS✿:\s*\{[^}]*\}/gs, "")
-    .trim();
+  let result = text;
+
+  // Strip TOOL_CALL: {...} with balanced braces
+  let idx = 0;
+  while ((idx = result.indexOf("TOOL_CALL:")) !== -1) {
+    const jsonStart = result.indexOf("{", idx);
+    if (jsonStart === -1) {
+      result = result.slice(0, idx);
+      break;
+    }
+    let depth = 0;
+    let endIdx = jsonStart;
+    for (let i = jsonStart; i < result.length; i++) {
+      if (result[i] === "{") depth++;
+      if (result[i] === "}") depth--;
+      if (depth === 0) {
+        endIdx = i + 1;
+        break;
+      }
+    }
+    result = (result.slice(0, idx) + result.slice(endIdx)).trim();
+  }
+
+  // Strip [TOOL_CALLS] [...]
+  result = result.replace(/\[TOOL_CALLS\]\s*\[.*?\]/gs, "");
+
+  // Strip ✿FUNCTION✿: ... ✿ARGS✿: {...}
+  result = result.replace(/✿FUNCTION✿:[\s\S]*?✿ARGS✿:\s*\{.*?\}/gs, "");
+
+  return result.trim();
 }
 
 export function hasIncompleteToolCall(buffer: string): boolean {
-  if (buffer.includes("TOOL_CALL:") && !buffer.includes("}")) return true;
-  if (buffer.includes("[TOOL_CALLS]") && !/\[TOOL_CALLS\]\s*\[.*\]/.test(buffer)) return true;
-  if (buffer.includes("✿FUNCTION✿") && !buffer.includes("✿ARGS✿")) return true;
+  if (buffer.includes("TOOL_CALL:") && (!buffer.includes("}") || !parseToolCalls(buffer))) return true;
+  if (buffer.includes("[TOOL_CALLS]") && !/\[TOOL_CALLS\]\s*\[.*?\]/s.test(buffer)) return true;
+  if (buffer.includes("✿FUNCTION✿") && (!buffer.includes("✿ARGS✿") || !/✿ARGS✿:\s*\{.*?\}/s.test(buffer))) return true;
   return false;
+}
+
+const TOOL_PREFIXES = ["TOOL_CALL:", "[TOOL_CALLS]", "✿FUNCTION✿", "TOOL_CALL", "[TOOL", "✿"];
+
+export function isPotentialToolCallBuffer(buffer: string): boolean {
+  const trimmed = buffer.trimStart();
+  for (const prefix of TOOL_PREFIXES) {
+    if (prefix.startsWith(trimmed) || trimmed.startsWith(prefix) || trimmed.includes(prefix)) {
+      return true;
+    }
+  }
+  return hasIncompleteToolCall(buffer);
+}
+
+export function formatStreamingToolCalls(toolCalls: ToolCall[]) {
+  return toolCalls.map((tc, index) => ({
+    index,
+    id: tc.id,
+    type: "function" as const,
+    function: {
+      name: tc.function.name,
+      arguments: tc.function.arguments,
+    },
+  }));
 }

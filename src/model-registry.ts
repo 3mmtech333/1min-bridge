@@ -86,6 +86,41 @@ async function fetchAndProcess(): Promise<CachedModelData> {
   return processModels(chat, image, speech);
 }
 
+let chatSet = new Set<string>();
+let imageSet = new Set<string>();
+let visionSet = new Set<string>();
+let speechSet = new Set<string>();
+let allSet = new Set<string>();
+
+const FALLBACK_DATA: CachedModelData = {
+  chatModelIds: ["gpt-4o", "gpt-4.1", "claude-3-5-sonnet", "gemini-2.0-flash", "deepseek-chat"],
+  imageModelIds: ["flux-schnell", "flux-dev", "dall-e-3"],
+  visionModelIds: ["gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash"],
+  speechModelIds: ["whisper-1"],
+  entries: [
+    {
+      uuid: "fallback-gpt-4o",
+      modelId: "gpt-4o",
+      name: "GPT-4o",
+      group: "chat",
+      provider: "OpenAI",
+      status: "active",
+      features: ["UNIFY_CHAT_WITH_AI", "CHAT_WITH_IMAGE"],
+      creditMetadata: { CONTEXT: 128000, MAX_OUTPUT_TOKEN: 4096 },
+      modality: { INPUT: ["text", "image"], OUTPUT: ["text"] },
+    },
+  ],
+  fetchedAt: Date.now(),
+};
+
+function updateSets(data: CachedModelData) {
+  chatSet = new Set(data.chatModelIds);
+  imageSet = new Set(data.imageModelIds);
+  visionSet = new Set(data.visionModelIds);
+  speechSet = new Set(data.speechModelIds);
+  allSet = new Set([...data.chatModelIds, ...data.imageModelIds, ...data.speechModelIds]);
+}
+
 export async function getModelData(): Promise<CachedModelData> {
   // In-memory cache
   if (cache && Date.now() < cacheExpiry) return cache;
@@ -95,12 +130,24 @@ export async function getModelData(): Promise<CachedModelData> {
 
   inflight = fetchAndProcess()
     .then((data) => {
-      cache = data;
+      // If all fetched are empty, fallback or keep existing
+      if (data.entries.length === 0 && cache) {
+        console.warn("Empty models fetched, preserving existing cache");
+        cacheExpiry = Date.now() + config.cacheTtlMs;
+        return cache;
+      }
+      if (data.entries.length === 0 && !cache) {
+        console.warn("Models API returned empty list, using fallback defaults");
+        cache = FALLBACK_DATA;
+      } else {
+        cache = data;
+      }
+      updateSets(cache);
       cacheExpiry = Date.now() + config.cacheTtlMs;
       console.log(
-        `Models refreshed: ${data.chatModelIds.length} chat, ${data.imageModelIds.length} image, ${data.speechModelIds.length} speech`,
+        `Models refreshed: ${cache.chatModelIds.length} chat, ${cache.imageModelIds.length} image, ${cache.speechModelIds.length} speech`,
       );
-      return data;
+      return cache;
     })
     .catch((err) => {
       console.error("Failed to fetch models:", err);
@@ -109,7 +156,11 @@ export async function getModelData(): Promise<CachedModelData> {
         cacheExpiry = Date.now() + config.cacheTtlMs;
         return cache;
       }
-      throw err;
+      console.warn("Using fallback default models on startup failure");
+      cache = FALLBACK_DATA;
+      updateSets(cache);
+      cacheExpiry = Date.now() + config.cacheTtlMs;
+      return cache;
     })
     .finally(() => {
       inflight = null;
@@ -119,20 +170,26 @@ export async function getModelData(): Promise<CachedModelData> {
 }
 
 export async function isValidModel(model: string): Promise<boolean> {
-  const data = await getModelData();
-  return (
-    data.chatModelIds.includes(model) ||
-    data.imageModelIds.includes(model) ||
-    data.speechModelIds.includes(model)
-  );
+  if (allSet.size === 0) await getModelData();
+  return allSet.has(model);
 }
 
 export async function isVisionModel(model: string): Promise<boolean> {
-  const data = await getModelData();
-  return data.visionModelIds.includes(model);
+  if (visionSet.size === 0) await getModelData();
+  return visionSet.has(model);
 }
 
 export async function isImageModel(model: string): Promise<boolean> {
-  const data = await getModelData();
-  return data.imageModelIds.includes(model);
+  if (imageSet.size === 0) await getModelData();
+  return imageSet.has(model);
+}
+
+export async function isChatModel(model: string): Promise<boolean> {
+  if (chatSet.size === 0) await getModelData();
+  return chatSet.has(model);
+}
+
+export async function isSpeechModel(model: string): Promise<boolean> {
+  if (speechSet.size === 0) await getModelData();
+  return speechSet.has(model);
 }

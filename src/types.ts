@@ -104,6 +104,7 @@ export interface ChatCompletionRequest {
   stop?: string | string[];
   n?: number;
   response_format?: { type: string };
+  stream_options?: { include_usage?: boolean };
   user?: string;
 }
 
@@ -154,9 +155,23 @@ export interface ChatCompletionChoice {
   logprobs?: null;
 }
 
+export interface StreamingToolCall {
+  index: number;
+  id?: string;
+  type?: "function";
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
 export interface ChatCompletionChunkChoice {
   index: number;
-  delta: { role?: "assistant"; content?: string | null; tool_calls?: ToolCall[] };
+  delta: {
+    role?: "assistant";
+    content?: string | null;
+    tool_calls?: (ToolCall | StreamingToolCall)[];
+  };
   finish_reason: string | null;
   logprobs?: null;
 }
@@ -182,6 +197,7 @@ export interface ChatCompletionChunk {
   created: number;
   model: string;
   choices: ChatCompletionChunkChoice[];
+  usage?: UsageInfo | null;
 }
 
 export interface ImageData {
