@@ -19,6 +19,8 @@ import {
   buildToolSystemPrompt,
   parseToolCalls,
   stripToolCalls,
+  formatStreamingToolCalls,
+  isPotentialToolCallBuffer,
   type ChatTool,
 } from "../adapters/tool-parser.js";
 import type {
@@ -150,6 +152,11 @@ const chatRequestSchema = z.object({
   stop: z.union([z.string(), z.array(z.string())]).optional(),
   n: z.number().int().min(1).max(4).optional(),
   response_format: z.object({ type: z.string() }).optional(),
+  stream_options: z
+    .object({
+      include_usage: z.boolean().optional(),
+    })
+    .optional(),
   user: z.string().optional(),
   tools: z.array(toolSchema).optional(),
   tool_choice: z
@@ -234,16 +241,15 @@ async function extractImageUrls(
   apiKey: string,
   messages: ChatMessage[],
 ): Promise<string[]> {
-  const urls: string[] = [];
+  const uploadPromises: Promise<string>[] = [];
   for (const msg of messages) {
     if (!Array.isArray(msg.content)) continue;
     for (const part of msg.content) {
       if (part.type !== "image_url" || !part.image_url?.url) continue;
-      const url = await uploadAsset(apiKey, part.image_url.url, "image/png");
-      urls.push(url);
+      uploadPromises.push(uploadAsset(apiKey, part.image_url.url, "image/png"));
     }
   }
-  return urls;
+  return Promise.all(uploadPromises);
 }
 
 function estimateTokens(text: string): number {
@@ -266,8 +272,14 @@ function buildStreamingResponse(
   upstream: Response,
   model: string,
   chatId: string,
+  options?: {
+    hasTools?: boolean;
+    includeUsage?: boolean;
+    promptTokens?: number;
+  },
 ): Response {
   const created = nowSec();
+  const hasTools = options?.hasTools ?? false;
 
   return new Response(
     new ReadableStream({
@@ -291,6 +303,27 @@ function buildStreamingResponse(
 
         let buffer = "";
         let fullContent = "";
+        let pendingContentBuffer = "";
+
+        const flushContent = (text: string) => {
+          if (!text) return;
+          const sseChunk: ChatCompletionChunk = {
+            id: chatId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [
+              {
+                index: 0,
+                delta: { content: text },
+                finish_reason: null,
+              },
+            ],
+          };
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(sseChunk)}\n\n`),
+          );
+        };
 
         try {
           while (true) {
@@ -360,22 +393,16 @@ function buildStreamingResponse(
                 if (!filtered) continue;
 
                 fullContent += filtered;
-                const sseChunk: ChatCompletionChunk = {
-                  id: chatId,
-                  object: "chat.completion.chunk",
-                  created,
-                  model,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { content: filtered },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify(sseChunk)}\n\n`),
-                );
+
+                if (hasTools) {
+                  pendingContentBuffer += filtered;
+                  if (!isPotentialToolCallBuffer(pendingContentBuffer)) {
+                    flushContent(pendingContentBuffer);
+                    pendingContentBuffer = "";
+                  }
+                } else {
+                  flushContent(filtered);
+                }
               }
             }
           }
@@ -390,29 +417,28 @@ function buildStreamingResponse(
               const filtered = filterCrawlingText(text);
               if (filtered) {
                 fullContent += filtered;
-                const sseChunk: ChatCompletionChunk = {
-                  id: chatId,
-                  object: "chat.completion.chunk",
-                  created,
-                  model,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { content: filtered },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify(sseChunk)}\n\n`),
-                );
+                if (hasTools) {
+                  pendingContentBuffer += filtered;
+                  if (!isPotentialToolCallBuffer(pendingContentBuffer)) {
+                    flushContent(pendingContentBuffer);
+                    pendingContentBuffer = "";
+                  }
+                } else {
+                  flushContent(filtered);
+                }
               }
             }
           }
 
           // Check for tool calls in full content
           const toolCalls = parseToolCalls(fullContent);
-          if (toolCalls && toolCalls.length > 0) {
+          const hasToolCalls = toolCalls !== null && toolCalls.length > 0;
+
+          if (hasToolCalls) {
+            const leadingText = stripToolCalls(fullContent);
+            if (leadingText && pendingContentBuffer.includes(leadingText)) {
+              flushContent(leadingText);
+            }
             const toolCallChunk: ChatCompletionChunk = {
               id: chatId,
               object: "chat.completion.chunk",
@@ -421,7 +447,7 @@ function buildStreamingResponse(
               choices: [
                 {
                   index: 0,
-                  delta: { tool_calls: toolCalls },
+                  delta: { tool_calls: formatStreamingToolCalls(toolCalls) },
                   finish_reason: "tool_calls",
                 },
               ],
@@ -429,30 +455,54 @@ function buildStreamingResponse(
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify(toolCallChunk)}\n\n`),
             );
+          } else if (pendingContentBuffer) {
+            flushContent(pendingContentBuffer);
+            pendingContentBuffer = "";
           }
+
+          const finalChunk: ChatCompletionChunk = {
+            id: chatId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: hasToolCalls ? "tool_calls" : "stop",
+              },
+            ],
+          };
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(finalChunk)}\n\n`),
+          );
+
+          if (options?.includeUsage) {
+            const promptTokens = options.promptTokens ?? 0;
+            const completionTokens = estimateTokens(fullContent);
+            const usageChunk: ChatCompletionChunk = {
+              id: chatId,
+              object: "chat.completion.chunk",
+              created,
+              model,
+              choices: [],
+              usage: {
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                total_tokens: promptTokens + completionTokens,
+              },
+            };
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(usageChunk)}\n\n`),
+            );
+          }
+
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
         } catch (err) {
           console.error("Stream read error:", err);
+          controller.error(err);
         }
-
-        const hasToolCalls = parseToolCalls(fullContent) !== null;
-        const finalChunk: ChatCompletionChunk = {
-          id: chatId,
-          object: "chat.completion.chunk",
-          created,
-          model,
-          choices: [
-            {
-              index: 0,
-              delta: {},
-              finish_reason: hasToolCalls ? "tool_calls" : "stop",
-            },
-          ],
-        };
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(finalChunk)}\n\n`),
-        );
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
       },
     }),
     {
@@ -552,6 +602,12 @@ app.post("/v1/chat/completions", async (c) => {
 
   try {
     if (stream) {
+      const streamingOptions = {
+        hasTools: Boolean(tools && tools.length > 0 && tool_choice !== "none"),
+        includeUsage: body.stream_options?.include_usage ?? false,
+        promptTokens: estimateTokens(prompt),
+      };
+
       // Try structured UNIFY_CHAT_WITH_AI first, fall back to legacy
       let streamBody: ReadableStream<Uint8Array> | null = null;
       if (resolvedFeatureType === "CHAT_WITH_AI" && !isVision) {
@@ -570,12 +626,12 @@ app.post("/v1/chat/completions", async (c) => {
         const syntheticResponse = new Response(streamBody, {
           headers: { "Content-Type": "text/event-stream" },
         });
-        return buildStreamingResponse(syntheticResponse, cleanModel, chatId);
+        return buildStreamingResponse(syntheticResponse, cleanModel, chatId, streamingOptions);
       }
 
       // Fallback: legacy streaming
       const upstream = await callFeatureStream(apiKey, payload);
-      return buildStreamingResponse(upstream, cleanModel, chatId);
+      return buildStreamingResponse(upstream, cleanModel, chatId, streamingOptions);
     }
 
     // Non-streaming

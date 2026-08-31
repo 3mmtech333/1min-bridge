@@ -29,7 +29,7 @@ setInterval(() => {
   }
 }, 300_000);
 
-function getBucket(key: string, maxRequests: number): Bucket {
+function getBucket(key: string, maxRequests: number, windowMs: number): Bucket {
   let bucket = buckets.get(key);
   const now = Date.now();
 
@@ -41,10 +41,14 @@ function getBucket(key: string, maxRequests: number): Bucket {
 
   // Refill tokens based on elapsed time
   const elapsed = now - bucket.lastRefill;
-  const refillRate = maxRequests;
-  const tokensToAdd = Math.floor((elapsed / 60_000) * refillRate);
-  bucket.tokens = Math.min(maxRequests, bucket.tokens + tokensToAdd);
-  bucket.lastRefill = now;
+  const tokenIntervalMs = windowMs / maxRequests;
+  const tokensToAdd = Math.floor(elapsed / tokenIntervalMs);
+
+  if (tokensToAdd > 0) {
+    bucket.tokens = Math.min(maxRequests, bucket.tokens + tokensToAdd);
+    // Advance lastRefill only by the duration consumed by the added tokens
+    bucket.lastRefill += tokensToAdd * tokenIntervalMs;
+  }
 
   return bucket;
 }
@@ -66,7 +70,7 @@ export function rateLimitMiddleware(
     next: Next,
   ): Promise<Response | void> {
     const key = keyFn(c);
-    const bucket = getBucket(key, maxRequests);
+    const bucket = getBucket(key, maxRequests, windowMs);
 
     if (bucket.tokens <= 0) {
       const retryAfterSec = Math.ceil(windowMs / 1000);

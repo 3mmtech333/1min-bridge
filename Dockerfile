@@ -11,7 +11,7 @@ ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
 COPY tsconfig.json ./
 COPY src/ ./src/
-RUN npx tsc
+RUN npx tsc && npm prune --omit=dev
 
 # Stage 2: Production
 FROM node:22-alpine AS production

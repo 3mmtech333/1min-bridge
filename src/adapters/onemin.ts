@@ -105,7 +105,7 @@ export async function callFeatureStreamStructured(
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
+          const lines = buffer.split(/\r?\n/);
           buffer = lines.pop() ?? "";
 
           let currentEvent = "";
@@ -171,8 +171,12 @@ export async function uploadAsset(
     }
     if (imageData.startsWith("data:")) {
       const base64Part = imageData.split(",")[1] ?? imageData;
-      const uint8 = Uint8Array.from(atob(base64Part), (c) => c.charCodeAt(0));
-      return uploadBlob(apiKey, uint8, mimeType);
+      const buf = Buffer.from(base64Part, "base64");
+      return uploadBlob(
+        apiKey,
+        new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+        mimeType,
+      );
     }
   }
 

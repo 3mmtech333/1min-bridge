@@ -19,23 +19,32 @@ interface HistogramEntry {
   count: number;
 }
 
-const counters: Map<string, CounterEntry[]> = new Map();
-const histograms: Map<string, HistogramEntry[]> = new Map();
+const counters: Map<string, Map<string, CounterEntry>> = new Map();
+const histograms: Map<string, Map<string, HistogramEntry>> = new Map();
 
 const HISTOGRAM_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+
+function serializeLabels(labels: Record<string, string>): string {
+  const sortedKeys = Object.keys(labels).sort();
+  return sortedKeys.map((k) => `${k}=${labels[k]}`).join(",");
+}
 
 export function incrementCounter(
   name: string,
   labels: Record<string, string>,
 ): void {
-  if (!counters.has(name)) counters.set(name, []);
-  const entries = counters.get(name)!;
-  const key = JSON.stringify(labels);
-  const existing = entries.find((e) => JSON.stringify(e.labels) === key);
+  let metricMap = counters.get(name);
+  if (!metricMap) {
+    metricMap = new Map();
+    counters.set(name, metricMap);
+  }
+
+  const key = serializeLabels(labels);
+  const existing = metricMap.get(key);
   if (existing) {
     existing.value++;
   } else {
-    entries.push({ labels, value: 1 });
+    metricMap.set(key, { labels, value: 1 });
   }
 }
 
@@ -44,10 +53,14 @@ export function observeHistogram(
   labels: Record<string, string>,
   value: number,
 ): void {
-  if (!histograms.has(name)) histograms.set(name, []);
-  const entries = histograms.get(name)!;
-  const key = JSON.stringify(labels);
-  let existing = entries.find((e) => JSON.stringify(e.labels) === key);
+  let metricMap = histograms.get(name);
+  if (!metricMap) {
+    metricMap = new Map();
+    histograms.set(name, metricMap);
+  }
+
+  const key = serializeLabels(labels);
+  let existing = metricMap.get(key);
   if (!existing) {
     existing = {
       labels,
@@ -55,8 +68,9 @@ export function observeHistogram(
       sum: 0,
       count: 0,
     };
-    entries.push(existing);
+    metricMap.set(key, existing);
   }
+
   existing.sum += value;
   existing.count++;
   for (const bucket of existing.buckets) {
@@ -76,7 +90,7 @@ export function getMetricsText(): string {
   for (const [name, entries] of counters) {
     lines.push(`# HELP ${name} Total count`);
     lines.push(`# TYPE ${name} counter`);
-    for (const entry of entries) {
+    for (const entry of entries.values()) {
       lines.push(`${name}${formatLabels(entry.labels)} ${entry.value}`);
     }
   }
@@ -85,7 +99,7 @@ export function getMetricsText(): string {
   for (const [name, entries] of histograms) {
     lines.push(`# HELP ${name} Duration in seconds`);
     lines.push(`# TYPE ${name} histogram`);
-    for (const entry of entries) {
+    for (const entry of entries.values()) {
       for (const bucket of entry.buckets) {
         const labels = { ...entry.labels, le: String(bucket.le) };
         lines.push(`${name}_bucket${formatLabels(labels)} ${bucket.count}`);
