@@ -2,26 +2,32 @@
 # 1min-relay — Multi-stage Docker Build
 # ============================================================================
 
-# Stage 1: Build
-FROM node:22-alpine AS build
+# Stage 1: Fast Build on Native Host Architecture (avoids slow QEMU emulation for TS compile)
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci
+COPY src/ ./src/
+RUN npx tsc
+
+# Stage 2: Production Dependencies
+FROM --platform=$BUILDPLATFORM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
-ARG GIT_SHA=unknown
-ENV GIT_SHA=${GIT_SHA}
-COPY tsconfig.json ./
-COPY src/ ./src/
-RUN npx tsc && npm prune --omit=dev
+RUN npm ci --omit=dev
 
-# Stage 2: Production
+# Stage 3: Production Runtime
 FROM node:22-alpine AS production
 RUN apk add --no-cache tini
 WORKDIR /app
 
 # Copy only production artifacts
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
+
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
 
 # Non-root user
 RUN addgroup -g 1001 -S relay && \
