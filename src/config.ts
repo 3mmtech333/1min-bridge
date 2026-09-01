@@ -19,6 +19,16 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   LOG_FORMAT: z.enum(["text", "json"]).default("text"),
   ONE_MIN_API_KEY: z.string().optional(),
+  CHECKIN_ENABLED: z.string().optional(),
+  CHECKIN_EMAIL: z.string().optional(),
+  CHECKIN_PASSWORD: z.string().optional(),
+  CHECKIN_TOTP_SECRET: z.string().optional(),
+  CHECKIN_ON_STARTUP: z.string().default("true"),
+  CHECKIN_UTC_HOUR: z.string().default("8"),
+  CHECKIN_JITTER_MINUTES: z.string().default("10"),
+  CHECKIN_TELEGRAM_BOT_TOKEN: z.string().optional(),
+  CHECKIN_TELEGRAM_CHAT_ID: z.string().optional(),
+  CHECKIN_WEBHOOK_URL: z.string().optional(),
 });
 
 function loadConfig(): AppConfig {
@@ -28,6 +38,10 @@ function loadConfig(): AppConfig {
         .map((s) => s.trim())
         .filter(Boolean)
     : undefined;
+
+  const isExplicitEnabled = env.CHECKIN_ENABLED !== undefined
+    ? env.CHECKIN_ENABLED.toLowerCase() === "true" || env.CHECKIN_ENABLED === "1"
+    : Boolean(env.CHECKIN_EMAIL && env.CHECKIN_PASSWORD);
 
   return {
     port: parseInt(env.PORT, 10),
@@ -40,6 +54,18 @@ function loadConfig(): AppConfig {
     logLevel: env.LOG_LEVEL,
     logFormat: env.LOG_FORMAT,
     defaultApiKey: env.ONE_MIN_API_KEY || undefined,
+    checkin: {
+      enabled: isExplicitEnabled,
+      email: env.CHECKIN_EMAIL || undefined,
+      password: env.CHECKIN_PASSWORD || undefined,
+      totpSecret: env.CHECKIN_TOTP_SECRET || undefined,
+      onStartup: env.CHECKIN_ON_STARTUP.toLowerCase() === "true" || env.CHECKIN_ON_STARTUP === "1",
+      utcHour: parseInt(env.CHECKIN_UTC_HOUR, 10) || 8,
+      jitterMinutes: parseInt(env.CHECKIN_JITTER_MINUTES, 10) || 10,
+      telegramBotToken: env.CHECKIN_TELEGRAM_BOT_TOKEN || undefined,
+      telegramChatId: env.CHECKIN_TELEGRAM_CHAT_ID || undefined,
+      webhookUrl: env.CHECKIN_WEBHOOK_URL || undefined,
+    },
   };
 }
 

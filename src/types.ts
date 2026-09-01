@@ -430,6 +430,49 @@ export interface AppConfig {
   defaultApiKey?: string;
   searxngUrl?: string;
   searxngSecret?: string;
+  checkin: CheckinConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Daily Check-in types
+// ---------------------------------------------------------------------------
+
+export interface CheckinConfig {
+  enabled: boolean;
+  email?: string;
+  password?: string;
+  totpSecret?: string;
+  onStartup: boolean;
+  utcHour: number; // 0-23 (default 8 UTC = 00:00 PST)
+  jitterMinutes: number; // 0-30 (default 10)
+  telegramBotToken?: string;
+  telegramChatId?: string;
+  webhookUrl?: string;
+}
+
+export interface CheckinResult {
+  success: boolean;
+  timestamp: string;
+  userName?: string;
+  teamId?: string;
+  initialCredit?: number;
+  finalCredit?: number;
+  creditDiff?: number;
+  availablePercent?: string;
+  error?: string;
+  attemptCount?: number;
+  manual?: boolean;
+}
+
+export interface CheckinStatus {
+  enabled: boolean;
+  isConfigured: boolean;
+  lastRun?: CheckinResult;
+  nextScheduledRun?: string;
+  currentBalance?: number;
+  totalCheckins: number;
+  successfulCheckins: number;
+  history: CheckinResult[];
 }
 
 export interface OpenAIErrorBody {

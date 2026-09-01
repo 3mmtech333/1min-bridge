@@ -28,6 +28,7 @@ Universal, self-hosted and edge-native AI Gateway for [1min.ai](https://1min.ai)
 - **📚 RAG & Memory Unpacker** — Unrolls LangChain / Vector Store document JSONs (`pageContent`, metadata timestamps) into clean human-readable context blocks.
 - **🌐 Web Hub & Native Search** — Append `:online` to any model ID for 1min.ai native web search. Dedicated `POST /v1/web/fetch` (via Jina Reader) and `POST /v1/search` (via SearXNG).
 - **🔢 Accurate Token Estimation** — Integrated `gpt-tokenizer` for accurate BPE token counts on prompts, completions, and streaming headers.
+- **🎁 Resilient Automated Daily Check-in (+15,000 credits/day)** — Built-in background engine that claims the 15,000 daily check-in bonus directly via `api.1min.ai` authentication. Immune to UI/popups/DOM changes, supports RFC 6238 TOTP 2FA, configurable schedules with jitter, and Telegram/Webhook alerts.
 - **☁️ Universal Dual-Runtime** — Deploy anywhere:
   - **Docker / Node.js:** Self-hosted standalone container with graceful draining and Prometheus metrics.
   - **Cloudflare Workers:** Serverless global edge deployment using `wrangler.jsonc` and KV-backed state.
@@ -40,6 +41,8 @@ Universal, self-hosted and edge-native AI Gateway for [1min.ai](https://1min.ai)
 | Method | Endpoint | Standard | Description |
 |---|---|---|---|
 | `GET` | `/health` | Gateway | Health check & model registry statistics |
+| `GET` | `/v1/checkin/status` | Gateway | Check-in status, credit balance, last run result, and history |
+| `POST` | `/v1/checkin/run` | Gateway | Manual on-demand check-in trigger |
 | `GET` | `/v1/models` | OpenAI | Dynamic model catalog with context length & pricing |
 | `POST` | `/v1/chat/completions` | OpenAI | Chat completions, vision input, tool calling, SSE streaming |
 | `POST` | `/v1/responses` | OpenAI | Structured Responses API with JSON schema enforcement |
@@ -195,6 +198,43 @@ curl -X POST http://localhost:3000/v1/audio/speech \
   }' --output speech.mp3
 ```
 
+### 3. Automated Daily Check-in (+15,000 Credits)
+
+Check status, balance, and next scheduled check-in:
+
+```bash
+curl http://localhost:3000/v1/checkin/status
+```
+
+Example response:
+```json
+{
+  "enabled": true,
+  "isConfigured": true,
+  "lastRun": {
+    "success": true,
+    "timestamp": "2026-09-01T08:04:12.345Z",
+    "userName": "johndoe",
+    "initialCredit": 125000,
+    "finalCredit": 140000,
+    "creditDiff": 15000,
+    "availablePercent": "88.5",
+    "attemptCount": 1
+  },
+  "nextScheduledRun": "2026-09-02T08:06:21.000Z",
+  "currentBalance": 140000,
+  "totalCheckins": 12,
+  "successfulCheckins": 12,
+  "history": [...]
+}
+```
+
+Trigger an immediate manual check-in:
+
+```bash
+curl -X POST http://localhost:3000/v1/checkin/run
+```
+
 ---
 
 ## ⚙️ Environment Variables
@@ -210,6 +250,16 @@ curl -X POST http://localhost:3000/v1/audio/speech \
 | `SEARXNG_SECRET` | — | Optional SearXNG authorization key |
 | `LOG_LEVEL` | `info` | Logging verbosity: `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `text` | Logging format: `text` (dev) or `json` (production) |
+| `CHECKIN_ENABLED` | `false` (auto-enabled if email/password set) | Enable/disable the background daily check-in scheduler |
+| `CHECKIN_EMAIL` | — | Your 1min.ai account email |
+| `CHECKIN_PASSWORD` | — | Your 1min.ai account password |
+| `CHECKIN_TOTP_SECRET` | — | Optional Base32 TOTP secret if 2FA is active on your account |
+| `CHECKIN_ON_STARTUP` | `true` | Trigger check-in immediately upon container boot |
+| `CHECKIN_UTC_HOUR` | `8` (08:00 UTC = 00:00 PST) | Target UTC hour for daily check-in execution |
+| `CHECKIN_JITTER_MINUTES` | `10` | Random jitter window (0-N min) to avoid synchronized requests |
+| `CHECKIN_TELEGRAM_BOT_TOKEN` | — | Optional Telegram Bot Token for check-in notifications |
+| `CHECKIN_TELEGRAM_CHAT_ID` | — | Optional Telegram Chat ID to receive check-in notifications |
+| `CHECKIN_WEBHOOK_URL` | — | Optional Discord / Slack / custom webhook URL for check-in alerts |
 
 ---
 

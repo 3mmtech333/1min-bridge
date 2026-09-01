@@ -22,6 +22,8 @@ import webRoutes from "./routes/web.js";
 import docsRoutes from "./routes/docs.js";
 import youtubeRoutes from "./routes/youtube.js";
 import metricsRoutes from "./routes/metrics.js";
+import checkinRoutes from "./routes/checkin.js";
+import { getCheckinScheduler } from "./checkin/scheduler.js";
 
 const app = new Hono<Env>();
 
@@ -147,6 +149,7 @@ app.route("/", healthRoutes);
 app.route("/", modelRoutes);
 app.route("/", docsRoutes);
 app.route("/", metricsRoutes);
+app.route("/", checkinRoutes);
 
 // ---------------------------------------------------------------------------
 // Protected routes (auth + rate limit)
@@ -217,9 +220,14 @@ if (isMainModule && typeof process !== "undefined" && process.versions?.node) {
       console.log(`Listening on http://0.0.0.0:${info.port}`);
     });
 
+    // Start auto check-in scheduler (if enabled / configured)
+    const checkinScheduler = getCheckinScheduler();
+    checkinScheduler.start();
+
     const DRAIN_TIMEOUT_MS = 10_000;
     function shutdown(signal: string): void {
       console.log(`\n${signal} received, shutting down...`);
+      checkinScheduler.stop();
       if (server) {
         server.close(() => {
           console.log("Server closed (no longer accepting connections)");

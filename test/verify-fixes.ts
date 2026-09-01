@@ -233,6 +233,33 @@ Tool: [{"result": "ok"}]`;
 
   console.log("  ✅ Protocol routes and multi-auth headers verified.\n");
 
+  // --------------------------------------------------------------------------
+  // Test 8: RFC 6238 TOTP Generator & Base32 Decoding
+  // --------------------------------------------------------------------------
+  console.log("Test 8: RFC 6238 TOTP Generator & Base32 Decoding...");
+  const { base32Decode, generateTotp } = await import("../src/checkin/totp.js");
+  const decoded = base32Decode("MZXW6YTBOI======").toString("utf-8");
+  assert.strictEqual(decoded, "foobar");
+
+  const rfcSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+  const otp = generateTotp(rfcSecret, { timestamp: 59 * 1000, digits: 6, period: 30 });
+  assert.strictEqual(otp, "287082");
+  console.log("  ✅ Zero-dependency RFC 6238 TOTP generator verified.\n");
+
+  // --------------------------------------------------------------------------
+  // Test 9: Direct-API Checkin Status Endpoints
+  // --------------------------------------------------------------------------
+  console.log("Test 9: Check-in Status Endpoints & Health...");
+  const statusRes = await app.fetch(new Request("http://localhost:3000/v1/checkin/status"));
+  assert.strictEqual(statusRes.status, 200);
+  const statusData = await statusRes.json();
+  assert.strictEqual(typeof statusData.enabled, "boolean");
+  assert.ok(Array.isArray(statusData.history));
+
+  const aliasStatusRes = await app.fetch(new Request("http://localhost:3000/api/checkin/status"));
+  assert.strictEqual(aliasStatusRes.status, 200);
+  console.log("  ✅ Check-in status endpoints verified.\n");
+
   console.log("🎉 ALL VERIFICATION TESTS PASSED SUCCESSFULLY!\n");
   process.exit(0);
 }
