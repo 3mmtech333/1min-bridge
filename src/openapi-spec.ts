@@ -427,6 +427,132 @@ export const openApiSpec = {
         },
       },
     },
+    "/v1/messages": {
+      post: {
+        tags: ["Anthropic"],
+        summary: "Create a Message (Anthropic Compatible)",
+        description: "Creates a model response using the Anthropic Messages API format.",
+        operationId: "createAnthropicMessage",
+        security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
+        responses: {
+          "200": {
+            description: "Anthropic message response",
+            content: {
+              "application/json": {
+                schema: { type: "object" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/responses": {
+      post: {
+        tags: ["Responses"],
+        summary: "Create Structured Response (OpenAI Responses API)",
+        description: "Creates structured outputs with schema enforcement using the OpenAI Responses API format.",
+        operationId: "createResponse",
+        security: [{ bearerAuth: [] }],
+        responses: {
+          "200": {
+            description: "Responses API response",
+            content: {
+              "application/json": {
+                schema: { type: "object" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/audio/speech": {
+      post: {
+        tags: ["Audio"],
+        summary: "Text to speech",
+        description: "Generates audio from input text using OpenAI, Google, or ElevenLabs voices.",
+        operationId: "generateSpeech",
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["input"],
+                properties: {
+                  model: { type: "string", default: "tts-1" },
+                  input: { type: "string" },
+                  voice: { type: "string", default: "alloy" },
+                  response_format: { type: "string", default: "mp3" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Audio stream or JSON URL",
+          },
+        },
+      },
+    },
+    "/v1/web/fetch": {
+      post: {
+        tags: ["Web"],
+        summary: "Fetch and extract web page content",
+        description: "Extracts clean markdown from any URL via Jina Reader.",
+        operationId: "webFetch",
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["url"],
+                properties: {
+                  url: { type: "string", format: "uri" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Extracted markdown page content",
+          },
+        },
+      },
+    },
+    "/v1/search": {
+      post: {
+        tags: ["Web"],
+        summary: "Web search",
+        description: "Searches the web via SearXNG.",
+        operationId: "webSearch",
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["query"],
+                properties: {
+                  query: { type: "string" },
+                  limit: { type: "integer", default: 10 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Search results",
+          },
+        },
+      },
+    },
     "/v1/engines/youtube/summarize": {
       post: {
         tags: ["YouTube"],

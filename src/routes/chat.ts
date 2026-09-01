@@ -1,12 +1,13 @@
 // ============================================================================
 // 1min-bridge — POST /v1/chat/completions
-// Supports: streaming SSE, non-streaming JSON, vision, tool calling,
-//           feature suffixes (:online, :pdf, :summarize, :code),
-//           UNIFY_CHAT_WITH_AI structured SSE, crawling filter
+// Supports: streaming SSE, non-streaming JSON, vision, tool calling emulator,
+//           ResponseSanitizer, feature suffixes (:online, :pdf, :summarize, :code),
+//           UNIFY_CHAT_WITH_AI structured SSE, gpt-tokenizer token counts
 // ============================================================================
 
 import { Hono } from "hono";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { getModelData, isVisionModel } from "../model-registry.js";
 import {
   callFeature,
@@ -16,13 +17,11 @@ import {
 } from "../adapters/onemin.js";
 import { invalidRequestError, modelNotFoundError, sendError } from "../errors.js";
 import {
-  buildToolSystemPrompt,
-  parseToolCalls,
-  stripToolCalls,
-  formatStreamingToolCalls,
-  isPotentialToolCallBuffer,
-  type ChatTool,
-} from "../adapters/tool-parser.js";
+  ToolCallingEmulator,
+  type ToolDefinition,
+} from "../adapters/tool-emulator.js";
+import { ResponseSanitizer } from "../adapters/sanitizer.js";
+import { calculateTokens } from "../utils/tokens.js";
 import type {
   Env,
   ChatCompletionRequest,
@@ -33,34 +32,6 @@ import type {
 } from "../types.js";
 
 const app = new Hono<Env>();
-
-// ---------------------------------------------------------------------------
-// Crawling filter — 1min.ai injects unwanted UI text into responses
-// ---------------------------------------------------------------------------
-
-const CRAWL_PATTERNS = [
-  /\[?\s*🌐\s*Crawling\s+site.*/gi,
-  /\[?\s*🌐\s*Fetching.*/gi,
-  /\[?\s*⚡\s*Extracting\s+content\s+from.*/gi,
-  /Crawl\s+results?:.*/gi,
-  /Fetching\s+results?\s+from\s+web.*/gi,
-  /\[?\s*🔍\s*Searching.*/gi,
-];
-
-function filterCrawlingText(text: string): string {
-  let filtered = text;
-  for (const pattern of CRAWL_PATTERNS) {
-    filtered = filtered.replace(pattern, "");
-  }
-  return filtered.trim();
-}
-
-function isCrawlStatus(text: string): boolean {
-  return CRAWL_PATTERNS.some((p) => {
-    p.lastIndex = 0;
-    return p.test(text);
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Feature suffix mapping
@@ -111,19 +82,23 @@ const chatContentPartSchema = z.object({
 
 const chatMessageSchema = z.object({
   role: z.union([
-    z.literal("system"), z.literal("developer"), z.literal("user"),
-    z.literal("assistant"), z.literal("tool"), z.literal("function"),
+    z.literal("system"),
+    z.literal("developer"),
+    z.literal("user"),
+    z.literal("assistant"),
+    z.literal("tool"),
+    z.literal("function"),
   ]),
-  content: z.union([z.string(), z.array(chatContentPartSchema)]),
+  content: z.union([z.string(), z.array(chatContentPartSchema), z.null(), z.unknown()]).optional(),
   name: z.string().optional(),
   tool_calls: z
     .array(
       z.object({
-        id: z.string(),
-        type: z.literal("function"),
+        id: z.string().optional(),
+        type: z.literal("function").optional(),
         function: z.object({
           name: z.string(),
-          arguments: z.string(),
+          arguments: z.union([z.string(), z.record(z.string(), z.unknown())]),
         }),
       }),
     )
@@ -132,26 +107,33 @@ const chatMessageSchema = z.object({
 });
 
 const toolSchema = z.object({
-  type: z.literal("function"),
-  function: z.object({
-    name: z.string(),
-    description: z.string().optional(),
-    parameters: z.record(z.string(), z.unknown()).optional(),
-  }),
+  type: z.literal("function").optional(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  parameters: z.record(z.string(), z.unknown()).optional(),
+  input_schema: z.record(z.string(), z.unknown()).optional(),
+  function: z
+    .object({
+      name: z.string(),
+      description: z.string().optional(),
+      parameters: z.record(z.string(), z.unknown()).optional(),
+    })
+    .optional(),
 });
 
 const chatRequestSchema = z.object({
   model: z.string().min(1),
   messages: z.array(chatMessageSchema).min(1),
   stream: z.boolean().optional().default(false),
-  temperature: z.number().min(0).max(2).optional(),
+  temperature: z.number().optional(),
   max_tokens: z.number().int().positive().optional(),
-  top_p: z.number().min(0).max(1).optional(),
-  frequency_penalty: z.number().min(-2).max(2).optional(),
-  presence_penalty: z.number().min(-2).max(2).optional(),
+  max_completion_tokens: z.number().int().positive().optional(),
+  top_p: z.number().optional(),
+  frequency_penalty: z.number().optional(),
+  presence_penalty: z.number().optional(),
   stop: z.union([z.string(), z.array(z.string())]).optional(),
   n: z.number().int().min(1).max(4).optional(),
-  response_format: z.object({ type: z.string() }).optional(),
+  response_format: z.record(z.string(), z.unknown()).optional(),
   stream_options: z
     .object({
       include_usage: z.boolean().optional(),
@@ -159,42 +141,50 @@ const chatRequestSchema = z.object({
     .optional(),
   user: z.string().optional(),
   tools: z.array(toolSchema).optional(),
-  tool_choice: z
-    .union([
-      z.literal("auto"),
-      z.literal("required"),
-      z.literal("none"),
-      z.object({
-        type: z.literal("function"),
-        function: z.object({ name: z.string() }),
-      }),
-    ])
-    .optional(),
+  tool_choice: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
 });
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatMessagesFor1Min(
-  messages: ChatMessage[],
-  toolSystemPrompt?: string,
-): string {
+function formatMessagesFor1Min(messages: ChatMessage[]): string {
   const parts: string[] = [];
 
-  if (toolSystemPrompt) {
-    parts.push(`System: ${toolSystemPrompt}`);
-  }
-
   for (const m of messages) {
+    if (m.role === "tool" || m.role === "function") {
+      const cleanContent = ResponseSanitizer.unpackMemoryContent(m.content);
+      const prefix = m.tool_call_id
+        ? `[Contexto do Sistema - Informação Recuperada para ${m.tool_call_id}]:`
+        : `[Contexto do Sistema - Informação Recuperada]:`;
+      parts.push(`${prefix}\n${cleanContent}`);
+      continue;
+    }
+
+    if (
+      m.role === "assistant" &&
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.length > 0
+    ) {
+      const callsStr = m.tool_calls
+        .map((tc) => {
+          const fnName = tc.function?.name || "unnamed_tool";
+          const fnArgs = tc.function?.arguments ?? "{}";
+          const argsStr =
+            typeof fnArgs === "string" ? fnArgs : JSON.stringify(fnArgs);
+          return `${fnName}(${argsStr})`;
+        })
+        .join(", ");
+      parts.push(`[Assistente consultou: ${callsStr}]`);
+      continue;
+    }
+
     const roleLabel =
       m.role === "system" || m.role === "developer"
         ? "System"
         : m.role === "assistant"
           ? "Assistant"
-          : m.role === "tool" || m.role === "function"
-            ? "Tool Result"
-            : "Human";
+          : "Human";
 
     let text = "";
     if (typeof m.content === "string") {
@@ -202,23 +192,13 @@ function formatMessagesFor1Min(
     } else if (Array.isArray(m.content)) {
       text = m.content
         .filter(
-          (p): p is ChatContentPart & { type: "text" } => p.type === "text",
+          (p): p is ChatContentPart & { type: "text" } =>
+            Boolean(p && typeof p === "object" && p.type === "text"),
         )
         .map((p) => p.text ?? "")
         .join("\n");
-    }
-
-    if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
-      const toolCallsText = m.tool_calls
-        .map(
-          (tc) => `[Tool Call: ${tc.function.name}(${tc.function.arguments})]`,
-        )
-        .join("\n");
-      text = text ? `${text}\n${toolCallsText}` : toolCallsText;
-    }
-
-    if (m.role === "tool" && m.tool_call_id) {
-      text = `[Tool result for ${m.tool_call_id}]: ${text}`;
+    } else if (m.content) {
+      text = ResponseSanitizer.unpackMemoryContent(m.content);
     }
 
     if (text) {
@@ -233,7 +213,7 @@ function hasImageContent(messages: ChatMessage[]): boolean {
   return messages.some(
     (m) =>
       Array.isArray(m.content) &&
-      m.content.some((p) => p.type === "image_url"),
+      m.content.some((p) => p && typeof p === "object" && p.type === "image_url"),
   );
 }
 
@@ -245,19 +225,15 @@ async function extractImageUrls(
   for (const msg of messages) {
     if (!Array.isArray(msg.content)) continue;
     for (const part of msg.content) {
-      if (part.type !== "image_url" || !part.image_url?.url) continue;
+      if (!part || typeof part !== "object" || part.type !== "image_url" || !part.image_url?.url) continue;
       uploadPromises.push(uploadAsset(apiKey, part.image_url.url, "image/png"));
     }
   }
   return Promise.all(uploadPromises);
 }
 
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
 function newChatId(): string {
-  return `chatcmpl-${crypto.randomUUID()}`;
+  return `chatcmpl-${randomUUID()}`;
 }
 
 function nowSec(): number {
@@ -265,7 +241,7 @@ function nowSec(): number {
 }
 
 // ---------------------------------------------------------------------------
-// SSE streaming passthrough (with crawling filter + tool call support)
+// SSE streaming passthrough (with sanitizer + tool call support)
 // ---------------------------------------------------------------------------
 
 function buildStreamingResponse(
@@ -273,6 +249,7 @@ function buildStreamingResponse(
   model: string,
   chatId: string,
   options?: {
+    allowedTools?: ToolDefinition[];
     hasTools?: boolean;
     includeUsage?: boolean;
     promptTokens?: number;
@@ -280,6 +257,7 @@ function buildStreamingResponse(
 ): Response {
   const created = nowSec();
   const hasTools = options?.hasTools ?? false;
+  const allowedTools = options?.allowedTools;
 
   return new Response(
     new ReadableStream({
@@ -365,9 +343,7 @@ function buildStreamingResponse(
                     parsed !== null &&
                     "content" in parsed
                   ) {
-                    content = String(
-                      (parsed as { content: unknown }).content,
-                    );
+                    content = String((parsed as { content: unknown }).content);
                   } else if (
                     typeof parsed === "object" &&
                     parsed !== null &&
@@ -382,26 +358,17 @@ function buildStreamingResponse(
                 content = trimmed;
               }
 
-              // Crawling filter: skip crawl status messages
-              if (content && isCrawlStatus(content)) {
-                continue;
-              }
-
               if (content) {
-                // Also filter within multi-line content
-                const filtered = filterCrawlingText(content);
-                if (!filtered) continue;
-
-                fullContent += filtered;
+                fullContent += content;
 
                 if (hasTools) {
-                  pendingContentBuffer += filtered;
-                  if (!isPotentialToolCallBuffer(pendingContentBuffer)) {
+                  pendingContentBuffer += content;
+                  if (!ToolCallingEmulator.isPotentialToolCallBuffer(pendingContentBuffer)) {
                     flushContent(pendingContentBuffer);
                     pendingContentBuffer = "";
                   }
                 } else {
-                  flushContent(filtered);
+                  flushContent(content);
                 }
               }
             }
@@ -414,31 +381,26 @@ function buildStreamingResponse(
               const text = content.startsWith("data: ")
                 ? content.slice(6)
                 : content;
-              const filtered = filterCrawlingText(text);
-              if (filtered) {
-                fullContent += filtered;
+              if (text) {
+                fullContent += text;
                 if (hasTools) {
-                  pendingContentBuffer += filtered;
-                  if (!isPotentialToolCallBuffer(pendingContentBuffer)) {
+                  pendingContentBuffer += text;
+                  if (!ToolCallingEmulator.isPotentialToolCallBuffer(pendingContentBuffer)) {
                     flushContent(pendingContentBuffer);
                     pendingContentBuffer = "";
                   }
                 } else {
-                  flushContent(filtered);
+                  flushContent(text);
                 }
               }
             }
           }
 
-          // Check for tool calls in full content
-          const toolCalls = parseToolCalls(fullContent);
+          // Check for tool calls in full accumulated content
+          const toolCalls = ToolCallingEmulator.parseResponse(fullContent, allowedTools);
           const hasToolCalls = toolCalls !== null && toolCalls.length > 0;
 
           if (hasToolCalls) {
-            const leadingText = stripToolCalls(fullContent);
-            if (leadingText && pendingContentBuffer.includes(leadingText)) {
-              flushContent(leadingText);
-            }
             const toolCallChunk: ChatCompletionChunk = {
               id: chatId,
               object: "chat.completion.chunk",
@@ -447,7 +409,9 @@ function buildStreamingResponse(
               choices: [
                 {
                   index: 0,
-                  delta: { tool_calls: formatStreamingToolCalls(toolCalls) },
+                  delta: {
+                    tool_calls: ToolCallingEmulator.formatStreamingToolCalls(toolCalls),
+                  },
                   finish_reason: "tool_calls",
                 },
               ],
@@ -456,7 +420,10 @@ function buildStreamingResponse(
               encoder.encode(`data: ${JSON.stringify(toolCallChunk)}\n\n`),
             );
           } else if (pendingContentBuffer) {
-            flushContent(pendingContentBuffer);
+            const cleaned = ResponseSanitizer.cleanOutput(pendingContentBuffer);
+            if (cleaned) {
+              flushContent(cleaned);
+            }
             pendingContentBuffer = "";
           }
 
@@ -479,7 +446,7 @@ function buildStreamingResponse(
 
           if (options?.includeUsage) {
             const promptTokens = options.promptTokens ?? 0;
-            const completionTokens = estimateTokens(fullContent);
+            const completionTokens = calculateTokens(fullContent);
             const usageChunk: ChatCompletionChunk = {
               id: chatId,
               object: "chat.completion.chunk",
@@ -523,13 +490,10 @@ function buildStreamingResponse(
 app.post("/v1/chat/completions", async (c) => {
   const apiKey = c.get("oneMinApiKey");
 
-  let body: ChatCompletionRequest & {
-    tools?: ChatTool[];
-    tool_choice?: string;
-  };
+  let body: ChatCompletionRequest;
   try {
     const raw = await c.req.json();
-    body = chatRequestSchema.parse(raw) as typeof body;
+    body = chatRequestSchema.parse(raw) as unknown as ChatCompletionRequest;
   } catch (err) {
     if (err instanceof z.ZodError) {
       const msg = err.issues
@@ -572,16 +536,18 @@ app.post("/v1/chat/completions", async (c) => {
     imageList = await extractImageUrls(apiKey, messages);
   }
 
-  // Tool calling: build system prompt injection
-  let toolSystemPrompt: string | undefined;
-  if (tools && tools.length > 0 && tool_choice !== "none") {
-    toolSystemPrompt = buildToolSystemPrompt(tools, tool_choice);
+  // Tool calling: inject instructions into messages
+  const hasTools = Array.isArray(tools) && tools.length > 0 && tool_choice !== "none";
+  let finalMessages = messages;
+  if (hasTools && tools) {
+    finalMessages = ToolCallingEmulator.injectToolsIntoMessages(
+      messages,
+      tools as ToolDefinition[],
+      tool_choice,
+    );
   }
 
-  const prompt = formatMessagesFor1Min(
-    messages as ChatMessage[],
-    toolSystemPrompt,
-  );
+  const prompt = formatMessagesFor1Min(finalMessages);
 
   const payload = {
     type: resolvedFeatureType,
@@ -591,10 +557,9 @@ app.post("/v1/chat/completions", async (c) => {
       isMixed: false,
       webSearch,
       ...(imageList.length > 0 ? { imageList } : {}),
-      ...(body.temperature !== undefined
-        ? { temperature: body.temperature }
+      ...(body.max_tokens || body.max_completion_tokens
+        ? { maxTokens: body.max_tokens ?? body.max_completion_tokens }
         : {}),
-      ...(body.max_tokens !== undefined ? { maxTokens: body.max_tokens } : {}),
     },
   };
 
@@ -603,9 +568,10 @@ app.post("/v1/chat/completions", async (c) => {
   try {
     if (stream) {
       const streamingOptions = {
-        hasTools: Boolean(tools && tools.length > 0 && tool_choice !== "none"),
+        allowedTools: tools as ToolDefinition[] | undefined,
+        hasTools,
         includeUsage: body.stream_options?.include_usage ?? false,
-        promptTokens: estimateTokens(prompt),
+        promptTokens: calculateTokens(prompt),
       };
 
       // Try structured UNIFY_CHAT_WITH_AI first, fall back to legacy
@@ -622,41 +588,56 @@ app.post("/v1/chat/completions", async (c) => {
       }
 
       if (streamBody) {
-        // Wrap the structured stream in a Response for the streaming handler
         const syntheticResponse = new Response(streamBody, {
           headers: { "Content-Type": "text/event-stream" },
         });
-        return buildStreamingResponse(syntheticResponse, cleanModel, chatId, streamingOptions);
+        return buildStreamingResponse(
+          syntheticResponse,
+          cleanModel,
+          chatId,
+          streamingOptions,
+        );
       }
 
       // Fallback: legacy streaming
       const upstream = await callFeatureStream(apiKey, payload);
-      return buildStreamingResponse(upstream, cleanModel, chatId, streamingOptions);
+      return buildStreamingResponse(
+        upstream,
+        cleanModel,
+        chatId,
+        streamingOptions,
+      );
     }
 
     // Non-streaming
     const data = await callFeature(apiKey, payload);
     const resultObj = data.aiRecord?.aiRecordDetail?.resultObject;
-    let content = "";
+    let rawContent = "";
     if (typeof resultObj === "string") {
-      content = resultObj;
+      rawContent = resultObj;
     } else if (
       Array.isArray(resultObj) &&
       typeof resultObj[0] === "string"
     ) {
-      content = resultObj[0];
+      rawContent = resultObj[0];
     } else if (resultObj && typeof resultObj === "object") {
-      content = JSON.stringify(resultObj);
+      rawContent = JSON.stringify(resultObj);
     }
 
-    // Apply crawling filter to non-streaming responses too
-    content = filterCrawlingText(content);
-
     // Parse tool calls
-    const toolCalls = parseToolCalls(content);
+    const toolCalls = hasTools
+      ? ToolCallingEmulator.parseResponse(rawContent, tools as ToolDefinition[])
+      : null;
+
     const finishReason =
       toolCalls && toolCalls.length > 0 ? "tool_calls" : "stop";
-    const cleanContent = toolCalls ? stripToolCalls(content) || null : content;
+
+    const cleanContent = toolCalls
+      ? null
+      : ResponseSanitizer.cleanOutput(rawContent);
+
+    const promptTokens = calculateTokens(prompt);
+    const completionTokens = calculateTokens(rawContent);
 
     const response: ChatCompletionResponse = {
       id: chatId,
@@ -677,9 +658,9 @@ app.post("/v1/chat/completions", async (c) => {
         },
       ],
       usage: {
-        prompt_tokens: estimateTokens(prompt),
-        completion_tokens: estimateTokens(content),
-        total_tokens: estimateTokens(prompt) + estimateTokens(content),
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens,
       },
     };
 

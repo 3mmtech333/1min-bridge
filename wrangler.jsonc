@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "1min-bridge",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-07-25",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "ONE_MIN_CHAT_API_URL": "https://api.1min.ai/api/chat-with-ai",
+    "ONE_MIN_API_URL": "https://api.1min.ai/api/features",
+    "ONE_MIN_ASSET_URL": "https://api.1min.ai/api/assets",
+    "ONE_MIN_MODELS_API_URL": "https://api.1min.ai/models",
+    "AUTH_TOKEN": ""
+  },
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT_STORE"
+    },
+    {
+      "binding": "MODEL_CACHE"
+    }
+  ]
+}

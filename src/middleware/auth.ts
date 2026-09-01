@@ -1,6 +1,6 @@
 // ============================================================================
 // 1min-bridge — Auth Middleware
-// Extracts Bearer token or falls back to server-side default API key
+// Supports: Authorization Bearer, x-api-key, Master Proxy AUTH_TOKEN, default key
 // ============================================================================
 
 import type { Context, Next } from "hono";
@@ -9,29 +9,60 @@ import { authenticationError, sendError } from "../errors.js";
 import type { Env } from "../types.js";
 
 /**
- * Auth middleware: validates Authorization: Bearer <key> header.
- * Falls back to ONE_MIN_API_KEY env var if no header provided.
- * Stores the key in c.set("oneMinApiKey", key) for downstream use.
+ * Auth middleware: validates Authorization: Bearer <key> or x-api-key header.
+ * In Master Proxy mode (AUTH_TOKEN configured), validates client token and injects ONE_MIN_API_KEY.
+ * Falls back to ONE_MIN_API_KEY server-side default key.
  */
 export async function authMiddleware(
   c: Context<Env>,
   next: Next,
 ): Promise<Response | void> {
-  const auth = c.req.header("Authorization");
+  const authHeader = c.req.header("Authorization");
+  const xApiKey = c.req.header("x-api-key");
 
-  if (auth?.startsWith("Bearer ")) {
-    const apiKey = auth.slice(7).trim();
-    if (!apiKey) {
-      return sendError(c, authenticationError("Empty API key"));
+  let token: string | undefined;
+
+  if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.slice(7).trim();
+  } else if (xApiKey) {
+    token = xApiKey.trim();
+  }
+
+  const masterAuthToken =
+    c.env?.AUTH_TOKEN ||
+    process.env.AUTH_TOKEN;
+
+  const serverOneMinApiKey =
+    c.env?.ONE_MIN_API_KEY ||
+    config.defaultApiKey;
+
+  // 1. If client provided a token
+  if (token) {
+    // If master proxy token is configured and matches client token
+    if (masterAuthToken && token === masterAuthToken) {
+      if (!serverOneMinApiKey) {
+        return sendError(
+          c,
+          authenticationError(
+            "Master proxy AUTH_TOKEN matched, but ONE_MIN_API_KEY is not configured on the server.",
+          ),
+        );
+      }
+      c.set("oneMinApiKey", serverOneMinApiKey);
+      c.set("gatewayToken", token);
+      await next();
+      return;
     }
-    c.set("oneMinApiKey", apiKey);
+
+    // Otherwise, treat token as direct 1min.ai API key
+    c.set("oneMinApiKey", token);
     await next();
     return;
   }
 
-  // Fallback to server-side default key
-  if (config.defaultApiKey) {
-    c.set("oneMinApiKey", config.defaultApiKey);
+  // 2. Fallback to server-side default key
+  if (serverOneMinApiKey) {
+    c.set("oneMinApiKey", serverOneMinApiKey);
     await next();
     return;
   }
@@ -39,7 +70,7 @@ export async function authMiddleware(
   return sendError(
     c,
     authenticationError(
-      "Missing Authorization header. Pass Bearer <api-key> or set ONE_MIN_API_KEY on the server.",
+      "Missing API key. Provide 'Authorization: Bearer <key>', 'x-api-key: <key>', or set ONE_MIN_API_KEY on the server.",
     ),
   );
 }

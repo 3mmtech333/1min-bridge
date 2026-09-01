@@ -1,5 +1,5 @@
 // ============================================================================
-// 1min-relay — POST /v1/images/generations
+// 1min-bridge — POST /v1/images/generations
 // ============================================================================
 
 import { Hono } from "hono";
@@ -19,6 +19,8 @@ const imageRequestSchema = z.object({
   response_format: z.enum(["url", "b64_json"]).optional().default("url"),
   quality: z.enum(["standard", "hd"]).optional(),
   style: z.enum(["vivid", "natural"]).optional(),
+  output_format: z.enum(["png", "jpeg", "webp"]).optional(),
+  output_quality: z.number().min(1).max(100).optional(),
 });
 
 app.post("/v1/images/generations", async (c) => {
@@ -45,14 +47,19 @@ app.post("/v1/images/generations", async (c) => {
     return sendError(c, modelNotFoundError(model));
   }
 
+  const promptObject: Record<string, unknown> = {
+    prompt: body.prompt,
+    n: body.n ?? 1,
+    size: body.size ?? "1024x1024",
+  };
+
+  if (body.output_format) promptObject.output_format = body.output_format;
+  if (body.output_quality) promptObject.output_quality = body.output_quality;
+
   const payload = {
     type: "IMAGE_GENERATOR",
     model,
-    promptObject: {
-      prompt: body.prompt,
-      n: body.n ?? 1,
-      size: body.size ?? "1024x1024",
-    },
+    promptObject,
   };
 
   try {
@@ -69,7 +76,7 @@ app.post("/v1/images/generations", async (c) => {
     // Fix relative image paths from 1min.ai
     const ONEMIN_BASE = "https://api.1min.ai/";
     const resolvedUrls = urls.map((url) =>
-      url.startsWith("http") ? url : `${ONEMIN_BASE}${url}`
+      url.startsWith("http") ? url : `${ONEMIN_BASE}${url}`,
     );
 
     const response: ImageGenerationResponse = {
